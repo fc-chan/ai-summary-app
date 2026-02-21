@@ -4,7 +4,6 @@ import { useState, useEffect, useRef, DragEvent, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import MarkdownRenderer from '@/components/MarkdownRenderer';
 import ConfirmModal from '@/components/ConfirmModal';
-import TagEditor from '@/components/TagEditor';
 
 const PdfViewer = dynamic(() => import('@/components/PdfViewer'), { ssr: false });
 
@@ -79,27 +78,21 @@ export default function Home() {
   // Search
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Tags
-  const [fileTags, setFileTags] = useState<Record<string, string[]>>({});
-  const [tagFilter, setTagFilter] = useState<string[]>([]);
-  const [generatingTagsFor, setGeneratingTagsFor] = useState<string | null>(null);
+  // Keywords (AI-generated, read-only)
+  const [fileKeywords, setFileKeywords] = useState<Record<string, string[]>>({});
+  const [generatingKeywordsFor, setGeneratingKeywordsFor] = useState<string | null>(null);
 
-  // Load tags from localStorage on mount
+  // Load keywords from Supabase on mount
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem('ai-doc-tags');
-      if (stored) setFileTags(JSON.parse(stored));
-    } catch { /* ignore */ }
+    fetch('/api/tags')
+      .then(r => r.json())
+      .then(data => { if (data.keywords) setFileKeywords(data.keywords); })
+      .catch(() => { /* silent */ });
   }, []);
 
-  function persistTags(updated: Record<string, string[]>) {
-    setFileTags(updated);
-    try { localStorage.setItem('ai-doc-tags', JSON.stringify(updated)); } catch { /* ignore */ }
-  }
-
-  async function generateTags(fileName: string) {
-    if (generatingTagsFor === fileName) return;
-    setGeneratingTagsFor(fileName);
+  async function generateKeywords(fileName: string) {
+    if (generatingKeywordsFor === fileName) return;
+    setGeneratingKeywordsFor(fileName);
     try {
       const res = await fetch('/api/tags', {
         method: 'POST',
@@ -107,30 +100,12 @@ export default function Home() {
         body: JSON.stringify({ storagePath: fileName }),
       });
       const data = await res.json();
-      if (res.ok && Array.isArray(data.tags) && data.tags.length > 0) {
-        setFileTags(prev => {
-          const updated = { ...prev, [fileName]: data.tags };
-          try { localStorage.setItem('ai-doc-tags', JSON.stringify(updated)); } catch { /* ignore */ }
-          return updated;
-        });
+      if (res.ok && Array.isArray(data.keywords) && data.keywords.length > 0) {
+        setFileKeywords(prev => ({ ...prev, [fileName]: data.keywords }));
       }
     } catch { /* silent */ } finally {
-      setGeneratingTagsFor(null);
+      setGeneratingKeywordsFor(null);
     }
-  }
-
-  function addTag(fileName: string, tag: string) {
-    const trimmed = tag.trim();
-    if (!trimmed) return;
-    const prev = fileTags[fileName] ?? [];
-    if (prev.includes(trimmed)) return;
-    persistTags({ ...fileTags, [fileName]: [...prev, trimmed] });
-  }
-
-  function removeTag(fileName: string, tag: string) {
-    const prev = fileTags[fileName] ?? [];
-    persistTags({ ...fileTags, [fileName]: prev.filter(t => t !== tag) });
-    setTagFilter(tf => tf.filter(t => t !== tag));
   }
 
   // Confirm modal state
@@ -197,8 +172,8 @@ export default function Home() {
       if (!res.ok) throw new Error(data.error ?? 'Upload failed');
       setUploadMsg(`"${file.name}" uploaded!`);
       await fetchFiles();
-      // Auto-generate tags for the newly uploaded file
-      if (isSummarisable(file.name)) generateTags(file.name);
+      // Auto-generate keywords for the newly uploaded file
+      if (isSummarisable(file.name)) generateKeywords(file.name);
       setTimeout(() => setUploadMsg(null), 3000);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Upload error');
@@ -238,10 +213,10 @@ export default function Home() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Delete failed');
       if (selected?.name === file.name) { setSelected(null); setPreviewUrl(null); setSummary(null); }
-      // Clean up cached tags
-      const updated = { ...fileTags };
+      // Clean up cached keywords
+      const updated = { ...fileKeywords };
       delete updated[file.name];
-      persistTags(updated);
+      setFileKeywords(updated);
       await fetchFiles();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Delete error');
@@ -262,9 +237,9 @@ export default function Home() {
     setUserAnswers({});
     setQuizSubmitted(false);
     setLoadingUrl(true);
-    // Auto-generate tags in background if not yet cached
-    if (isSummarisable(file.name) && !fileTags[file.name]) {
-      generateTags(file.name);
+    // Auto-generate keywords in background if not yet cached
+    if (isSummarisable(file.name) && !fileKeywords[file.name]) {
+      generateKeywords(file.name);
     }
     try {
       const res = await fetch(`/api/documents/${encodeURIComponent(file.name)}`);
@@ -412,7 +387,7 @@ export default function Home() {
                 </button>
               </div>
               {/* Search */}
-              <div className="px-3 pt-2 pb-1 border-b border-gray-100">
+              <div className="px-3 py-2 border-b border-gray-100">
                 <div className="relative">
                   <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11A6 6 0 105 11a6 6 0 0012 0z" />
@@ -428,37 +403,6 @@ export default function Home() {
                     <button onClick={() => setSearchQuery('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs">✕</button>
                   )}
                 </div>
-                {/* Tag filter chips */}
-                {(() => {
-                  const allTags = [...new Set(Object.values(fileTags).flat())].sort();
-                  if (allTags.length === 0) return null;
-                  return (
-                    <div className="flex flex-wrap gap-1 pt-2 pb-1">
-                      {allTags.map(tag => {
-                        const active = tagFilter.includes(tag);
-                        return (
-                          <button
-                            key={tag}
-                            onClick={() => setTagFilter(prev => active ? prev.filter(t => t !== tag) : [...prev, tag])}
-                            className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
-                              active
-                                ? 'bg-blue-600 text-white border-blue-600'
-                                : 'bg-gray-50 text-gray-500 border-gray-200 hover:border-blue-400 hover:text-blue-600'
-                            }`}
-                          >
-                            {tag}
-                          </button>
-                        );
-                      })}
-                      {tagFilter.length > 0 && (
-                        <button
-                          onClick={() => setTagFilter([])}
-                          className="text-[10px] px-2 py-0.5 rounded-full border border-gray-200 text-gray-400 hover:text-gray-600"
-                        >✕ Clear</button>
-                      )}
-                    </div>
-                  );
-                })()}
               </div>
 
               {loadingList && files.length === 0 ? (
@@ -467,22 +411,18 @@ export default function Home() {
                 <div className="px-4 py-8 text-center text-sm text-gray-400">No documents yet.</div>
               ) : (
                 /* Scrollable on mobile, full on desktop */
-                <ul className="max-h-48 lg:max-h-[calc(100vh-400px)] overflow-y-auto divide-y divide-gray-100">
+                <ul className="max-h-48 lg:max-h-[calc(100vh-360px)] overflow-y-auto divide-y divide-gray-100">
                   {(() => {
-                    const filtered = files.filter(f => {
-                      const matchesSearch = f.name.toLowerCase().includes(searchQuery.toLowerCase());
-                      const matchesTags = tagFilter.length === 0 || tagFilter.every(t => (fileTags[f.name] ?? []).includes(t));
-                      return matchesSearch && matchesTags;
-                    });
+                    const filtered = files.filter(f =>
+                      f.name.toLowerCase().includes(searchQuery.toLowerCase())
+                    );
                     if (filtered.length === 0) return (
-                      <li className="px-4 py-6 text-center text-xs text-gray-400">
-                        {tagFilter.length > 0 ? 'No documents match the selected tags.' : `No results for "${searchQuery}"`}
-                      </li>
+                      <li className="px-4 py-6 text-center text-xs text-gray-400">No results for &ldquo;{searchQuery}&rdquo;</li>
                     );
                     return filtered.map((file) => {
                       const isActive = selected?.name === file.name;
-                      const tags = fileTags[file.name] ?? [];
-                      const isGenerating = generatingTagsFor === file.name;
+                      const keywords = fileKeywords[file.name] ?? [];
+                      const isGenerating = generatingKeywordsFor === file.name;
                       return (
                         <li
                           key={file.id}
@@ -490,29 +430,19 @@ export default function Home() {
                           className={`flex items-start gap-3 px-4 py-3 cursor-pointer transition-colors
                             ${isActive ? 'bg-blue-50' : 'hover:bg-gray-50'}`}
                         >
-                          {/* File type icon */}
                           <div className={`shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold ${fileIcon(file.name).cls}`}>
                             {fileIcon(file.name).label}
                           </div>
                           <div className="flex-1 min-w-0">
                             <p className="text-xs font-medium text-gray-900 truncate">{file.name}</p>
                             <p className="text-xs text-gray-400">{formatBytes(file.metadata?.size ?? 0)}</p>
-                            {/* Tag chips */}
                             {isGenerating ? (
-                              <p className="text-[10px] text-gray-400 animate-pulse mt-1">Generating tags…</p>
-                            ) : tags.length > 0 ? (
+                              <p className="text-[10px] text-gray-400 animate-pulse mt-1">Generating keywords…</p>
+                            ) : keywords.length > 0 ? (
                               <div className="flex flex-wrap gap-1 mt-1">
-                                {tags.map(tag => (
-                                  <span
-                                    key={tag}
-                                    onClick={(e) => { e.stopPropagation(); setTagFilter(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]); }}
-                                    className={`text-[10px] px-1.5 py-0.5 rounded-full border cursor-pointer transition-colors ${
-                                      tagFilter.includes(tag)
-                                        ? 'bg-blue-600 text-white border-blue-600'
-                                        : 'bg-gray-100 text-gray-500 border-gray-200 hover:border-blue-400 hover:text-blue-600'
-                                    }`}
-                                  >
-                                    {tag}
+                                {keywords.map(kw => (
+                                  <span key={kw} className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-100">
+                                    {kw}
                                   </span>
                                 ))}
                               </div>
@@ -556,16 +486,18 @@ export default function Home() {
                     <div className="min-w-0 flex-1">
                       <p className="text-sm font-semibold text-gray-900 truncate">{selected.name}</p>
                       <p className="text-xs text-gray-400 mb-1">{formatBytes(selected.metadata?.size ?? 0)}</p>
-                      {/* Tags on selected file */}
-                      <TagEditor
-                        tags={fileTags[selected.name] ?? []}
-                        isGenerating={generatingTagsFor === selected.name}
-                        onAdd={(tag) => addTag(selected.name, tag)}
-                        onRemove={(tag) => removeTag(selected.name, tag)}
-                        onRegenerate={() => { persistTags({ ...fileTags, [selected.name]: [] }); generateTags(selected.name); }}
-                        activeFilter={tagFilter}
-                        onFilterToggle={(tag) => setTagFilter(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag])}
-                      />
+                      {/* Keywords */}
+                      {generatingKeywordsFor === selected.name ? (
+                        <p className="text-[10px] text-purple-500 animate-pulse">Generating keywords…</p>
+                      ) : (fileKeywords[selected.name] ?? []).length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                          {(fileKeywords[selected.name] ?? []).map(kw => (
+                            <span key={kw} className="text-[10px] px-2 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-100">
+                              {kw}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                     {isSummarisable(selected.name) && (
                       <div className="flex flex-col items-end gap-1.5 shrink-0">

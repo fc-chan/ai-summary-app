@@ -11,10 +11,29 @@ const client = new OpenAI({
 });
 
 const MODEL = process.env.GITHUB_MODEL ?? 'gpt-4o-mini';
+const KEYWORDS_FILE = '__keywords__.json';
 
-// POST /api/tags
+// ── Helpers ──────────────────────────────────────────────────────────
+
+async function loadAll(): Promise<Record<string, string[]>> {
+  const { data, error } = await supabaseAdmin.storage.from(BUCKET_NAME).download(KEYWORDS_FILE);
+  if (error || !data) return {};
+  try { return JSON.parse(await data.text()); } catch { return {}; }
+}
+
+async function saveAll(map: Record<string, string[]>): Promise<void> {
+  const blob = new Blob([JSON.stringify(map)], { type: 'application/json' });
+  await supabaseAdmin.storage.from(BUCKET_NAME).upload(KEYWORDS_FILE, blob, { upsert: true });
+}
+
+// ── GET /api/tags  → return all saved keywords ──────────────────────
+export async function GET() {
+  const keywords = await loadAll();
+  return NextResponse.json({ keywords });
+}
+
+// ── POST /api/tags  → AI-generate 3 keywords for a file, then persist
 // Body: { storagePath: string }
-// Returns: { tags: string[] }
 export async function POST(req: NextRequest) {
   let body: { storagePath?: string };
   try {
@@ -28,7 +47,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'storagePath is required' }, { status: 400 });
   }
 
-  // 1. Download file from Supabase Storage
+  // 1. Download file
   const { data: fileData, error: downloadError } = await supabaseAdmin.storage
     .from(BUCKET_NAME)
     .download(storagePath);
@@ -49,14 +68,11 @@ export async function POST(req: NextRequest) {
   }
 
   const text = result.text;
-  if (!text) {
-    return NextResponse.json({ tags: [] });
-  }
+  if (!text) return NextResponse.json({ keywords: [] });
 
-  // Use first 4000 chars — enough for classification
   const excerpt = text.slice(0, 4000);
 
-  // 3. Ask AI for tags
+  // 3. Ask AI for 3 keywords
   try {
     const response = await client.chat.completions.create({
       model: MODEL,
@@ -64,44 +80,48 @@ export async function POST(req: NextRequest) {
         {
           role: 'system',
           content:
-            'You are a document classification assistant. ' +
-            'Given a document excerpt, return exactly 1 tag that best describes the main topic or domain (e.g. Finance, Biology, Law, Technology, Research, Tutorial). ' +
-            'Rules: the tag is 1–3 words, Title Case, no punctuation, no hash symbols. ' +
-            'Respond ONLY with a JSON array containing one string, e.g. ["Finance"].',
+            'You are a document keyword extractor. ' +
+            'Given a document excerpt, return exactly 3 keywords that best capture the core topics. ' +
+            'Rules: each keyword is 1–3 words, Title Case, no punctuation, no hash symbols. ' +
+            'Respond ONLY with a JSON array of exactly 3 strings, e.g. ["Machine Learning","Neural Networks","Data Science"].',
         },
         {
           role: 'user',
-          content: `Classify this document:\n\n${excerpt}`,
+          content: `Extract 3 keywords from this document:\n\n${excerpt}`,
         },
       ],
       temperature: 0.2,
-      max_tokens: 120,
+      max_tokens: 80,
     });
 
     const raw = response.choices[0]?.message?.content?.trim() ?? '[]';
-
-    // Parse — strip any markdown code fences if present
-    const jsonStr = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/,'').trim();
-    let tags: string[] = [];
+    const jsonStr = raw.replace(/^```[a-z]*\n?/i, '').replace(/```$/, '').trim();
+    let keywords: string[] = [];
     try {
       const parsed = JSON.parse(jsonStr);
       if (Array.isArray(parsed)) {
-        tags = parsed
+        keywords = parsed
           .filter((t) => typeof t === 'string')
           .map((t: string) => t.trim())
           .filter((t) => t.length > 0)
-          .slice(0, 1);
+          .slice(0, 3);
       }
     } catch {
-      // Fallback: extract quoted strings
       const matches = raw.match(/"([^"]+)"/g);
-      tags = matches ? matches.map((m) => m.replace(/"/g, '').trim()).slice(0, 8) : [];
+      keywords = matches ? matches.map((m) => m.replace(/"/g, '').trim()).slice(0, 3) : [];
     }
 
-    return NextResponse.json({ tags });
+    // 4. Persist
+    if (keywords.length > 0) {
+      const all = await loadAll();
+      all[storagePath] = keywords;
+      await saveAll(all);
+    }
+
+    return NextResponse.json({ keywords });
   } catch (e: unknown) {
     return NextResponse.json(
-      { error: `Tag generation failed: ${e instanceof Error ? e.message : 'unknown'}` },
+      { error: `Keyword generation failed: ${e instanceof Error ? e.message : 'unknown'}` },
       { status: 500 }
     );
   }
