@@ -14,7 +14,14 @@ interface StorageFile {
   metadata: { size: number; mimetype: string } | null;
 }
 
-type Panel = 'preview' | 'summary';
+type Panel = 'preview' | 'summary' | 'quiz';
+
+interface QuizQuestion {
+  id: number;
+  question: string;
+  options: string[];
+  answer: string;
+}
 
 function formatBytes(b: number) {
   if (!b) return '—';
@@ -59,6 +66,17 @@ export default function Home() {
   const [summary, setSummary] = useState<string | null>(null);
   const [loadingSummary, setLoadingSummary] = useState(false);
   const [summaryError, setSummaryError] = useState<string | null>(null);
+  const [summaryLength, setSummaryLength] = useState<'short' | 'medium' | 'long'>('medium');
+
+  // Quiz state
+  const [quiz, setQuiz] = useState<QuizQuestion[] | null>(null);
+  const [loadingQuiz, setLoadingQuiz] = useState(false);
+  const [quizError, setQuizError] = useState<string | null>(null);
+  const [userAnswers, setUserAnswers] = useState<Record<number, string>>({});
+  const [quizSubmitted, setQuizSubmitted] = useState(false);
+
+  // Search
+  const [searchQuery, setSearchQuery] = useState('');
 
   // Confirm modal state
   type ModalConfig = { title: string; message: string; confirmLabel: string; cancelLabel: string; variant: 'danger' | 'warning' | 'default'; onConfirm: () => void; };
@@ -174,6 +192,10 @@ export default function Home() {
     setTextContent(null);
     setSummary(null);
     setSummaryError(null);
+    setQuiz(null);
+    setQuizError(null);
+    setUserAnswers({});
+    setQuizSubmitted(false);
     setLoadingUrl(true);
     try {
       const res = await fetch(`/api/documents/${encodeURIComponent(file.name)}`);
@@ -192,17 +214,18 @@ export default function Home() {
     }
   }
 
-  async function handleSummarise() {
+  async function handleSummarise(forceLength?: 'short' | 'medium' | 'long') {
     if (!selected) return;
     setActivePanel('summary');
-    if (summary) return; // already fetched
+    const len = forceLength ?? summaryLength;
+    if (summary) return;
     setLoadingSummary(true);
     setSummaryError(null);
     try {
       const res = await fetch('/api/summarize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ storagePath: selected.name }),
+        body: JSON.stringify({ storagePath: selected.name, length: len }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Summarisation failed');
@@ -212,6 +235,35 @@ export default function Home() {
     } finally {
       setLoadingSummary(false);
     }
+  }
+
+  async function handleQuiz() {
+    if (!selected) return;
+    setActivePanel('quiz');
+    if (quiz) return;
+    setLoadingQuiz(true);
+    setQuizError(null);
+    try {
+      const res = await fetch('/api/quiz', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ storagePath: selected.name }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? 'Quiz generation failed');
+      setQuiz(data.questions);
+    } catch (e: unknown) {
+      setQuizError(e instanceof Error ? e.message : 'Error');
+    } finally {
+      setLoadingQuiz(false);
+    }
+  }
+
+  function handleLengthChange(len: 'short' | 'medium' | 'long') {
+    if (len === summaryLength) return;
+    setSummaryLength(len);
+    setSummary(null);  // invalidate cached summary
+    setSummaryError(null);
   }
 
   return (
@@ -290,6 +342,24 @@ export default function Home() {
                   {loadingList ? '…' : 'Refresh'}
                 </button>
               </div>
+              {/* Search */}
+              <div className="px-3 py-2 border-b border-gray-100">
+                <div className="relative">
+                  <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11A6 6 0 105 11a6 6 0 0012 0z" />
+                  </svg>
+                  <input
+                    type="text"
+                    placeholder="Search documents…"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-300 bg-gray-50"
+                  />
+                  {searchQuery && (
+                    <button onClick={() => setSearchQuery('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs">✕</button>
+                  )}
+                </div>
+              </div>
 
               {loadingList && files.length === 0 ? (
                 <div className="px-4 py-8 text-center text-sm text-gray-400 animate-pulse">Loading…</div>
@@ -297,8 +367,11 @@ export default function Home() {
                 <div className="px-4 py-8 text-center text-sm text-gray-400">No documents yet.</div>
               ) : (
                 /* Scrollable on mobile, full on desktop */
-                <ul className="max-h-48 lg:max-h-[calc(100vh-320px)] overflow-y-auto divide-y divide-gray-100">
-                  {files.map((file) => {
+                <ul className="max-h-48 lg:max-h-[calc(100vh-360px)] overflow-y-auto divide-y divide-gray-100">
+                  {files.filter(f => f.name.toLowerCase().includes(searchQuery.toLowerCase())).length === 0 ? (
+                    <li className="px-4 py-6 text-center text-xs text-gray-400">No results for &ldquo;{searchQuery}&rdquo;</li>
+                  ) : null}
+                  {files.filter(f => f.name.toLowerCase().includes(searchQuery.toLowerCase())).map((file) => {
                     const isActive = selected?.name === file.name;
                     return (
                       <li
@@ -354,38 +427,80 @@ export default function Home() {
                       <p className="text-xs text-gray-400">{formatBytes(selected.metadata?.size ?? 0)}</p>
                     </div>
                     {isSummarisable(selected.name) && (
-                      <button
-                        onClick={handleSummarise}
-                        disabled={loadingSummary}
-                        className="shrink-0 flex items-center gap-1.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-60 text-white text-xs font-medium px-3 py-1.5 rounded-lg transition-colors"
-                      >
-                        {loadingSummary ? (
-                          <>
-                            <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
-                              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
-                            </svg>
-                            Analysing…
-                          </>
-                        ) : (
-                          <>✦ AI Summary</>
-                        )}
-                      </button>
+                      <div className="flex flex-col items-end gap-1.5 shrink-0">
+                        <div className="flex gap-1.5">
+                          <button
+                            onClick={handleSummarise}
+                            disabled={loadingSummary}
+                            className="flex items-center gap-1.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-60 text-white text-xs font-medium px-3 py-1.5 rounded-lg transition-colors"
+                          >
+                            {loadingSummary ? (
+                              <>
+                                <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                                </svg>
+                                Analysing…
+                              </>
+                            ) : (
+                              <>✦ Summary</>
+                            )}
+                          </button>
+                          <button
+                            onClick={handleQuiz}
+                            disabled={loadingQuiz}
+                            className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white text-xs font-medium px-3 py-1.5 rounded-lg transition-colors"
+                          >
+                            {loadingQuiz ? (
+                              <>
+                                <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                                </svg>
+                                Generating…
+                              </>
+                            ) : (
+                              <>✎ Quiz</>
+                            )}
+                          </button>
+                        </div>
+                        {/* Summary length selector */}
+                        <div className="flex rounded-md border border-gray-200 overflow-hidden text-xs">
+                          {(['short', 'medium', 'long'] as const).map((len) => (
+                            <button
+                              key={len}
+                              onClick={() => handleLengthChange(len)}
+                              className={`px-2.5 py-1 capitalize transition-colors ${
+                                summaryLength === len
+                                  ? 'bg-purple-600 text-white font-medium'
+                                  : 'bg-white text-gray-500 hover:bg-gray-50'
+                              }`}
+                            >
+                              {len}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                     )}
                   </div>
 
                   {/* Tabs */}
                   <div className="flex gap-1">
-                    {(['preview', 'summary'] as Panel[]).map((tab) => (
+                    {(['preview', 'summary', 'quiz'] as Panel[]).map((tab) => (
                       <button
                         key={tab}
-                        onClick={() => { setActivePanel(tab); if (tab === 'summary' && !summary) handleSummarise(); }}
+                        onClick={() => {
+                          if (tab === 'summary') { setActivePanel('summary'); if (!summary && !loadingSummary) handleSummarise(); }
+                          else if (tab === 'quiz') { setActivePanel('quiz'); if (!quiz && !loadingQuiz) handleQuiz(); }
+                          else setActivePanel('preview');
+                        }}
                         className={`px-4 py-2 text-xs font-medium rounded-t-md transition-colors capitalize
                           ${activePanel === tab
                             ? 'bg-gray-50 border border-b-white border-gray-200 -mb-px text-blue-600'
                             : 'text-gray-500 hover:text-gray-700'}`}
+                        style={{ display: tab !== 'preview' && !isSummarisable(selected.name) ? 'none' : undefined }}
                       >
-                        {tab === 'summary' ? '✦ Summary' : '⊞ Preview'}
+                        {tab === 'summary' ? '✦ Summary' : tab === 'quiz' ? '✎ Quiz' : '⊞ Preview'}
                       </button>
                     ))}
                   </div>
@@ -430,6 +545,109 @@ export default function Home() {
                     </>
                   )}
 
+                  {activePanel === 'quiz' && (
+                    <div className="h-full overflow-y-auto">
+                      {loadingQuiz ? (
+                        <div className="flex flex-col items-center justify-center gap-3 py-16 text-gray-500">
+                          <svg className="w-8 h-8 animate-spin text-emerald-500" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                          </svg>
+                          <p className="text-sm">Generating quiz questions…</p>
+                        </div>
+                      ) : quizError ? (
+                        <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+                          <p className="font-semibold mb-1">Quiz generation failed</p>
+                          <p>{quizError}</p>
+                          <button onClick={() => { setQuiz(null); handleQuiz(); }} className="mt-3 text-xs text-red-600 hover:text-red-800 underline">Try again</button>
+                        </div>
+                      ) : quiz ? (
+                        <div className="space-y-5">
+                          <div className="flex items-center justify-between">
+                            <span className="text-emerald-700 text-sm font-semibold">✎ Quiz — {quiz.length} Questions</span>
+                            {quizSubmitted && (
+                              <button
+                                onClick={() => { setUserAnswers({}); setQuizSubmitted(false); setQuiz(null); handleQuiz(); }}
+                                className="text-xs text-emerald-600 hover:text-emerald-800 border border-emerald-200 rounded-md px-2 py-1"
+                              >Retake Quiz</button>
+                            )}
+                          </div>
+                          {quiz.map((q, qi) => {
+                            const chosen = userAnswers[q.id];
+                            const correct = q.answer;
+                            return (
+                              <div key={q.id} className={`rounded-xl border p-4 ${
+                                quizSubmitted
+                                  ? chosen === correct ? 'border-emerald-300 bg-emerald-50' : 'border-red-200 bg-red-50'
+                                  : 'border-gray-200 bg-white'
+                              }`}>
+                                <p className="text-sm font-medium text-gray-800 mb-3">
+                                  <span className="text-gray-400 mr-1">{qi + 1}.</span> {q.question}
+                                </p>
+                                <div className="space-y-2">
+                                  {q.options.map((opt) => {
+                                    const letter = opt.charAt(0);
+                                    const isChosen = chosen === letter;
+                                    const isCorrect = correct === letter;
+                                    let cls = 'border-gray-200 bg-gray-50 text-gray-700 hover:border-emerald-400 hover:bg-emerald-50';
+                                    if (quizSubmitted) {
+                                      if (isCorrect) cls = 'border-emerald-400 bg-emerald-100 text-emerald-800 font-medium';
+                                      else if (isChosen) cls = 'border-red-300 bg-red-100 text-red-700 line-through';
+                                      else cls = 'border-gray-200 bg-gray-50 text-gray-400';
+                                    } else if (isChosen) {
+                                      cls = 'border-blue-400 bg-blue-50 text-blue-800 font-medium';
+                                    }
+                                    return (
+                                      <button
+                                        key={letter}
+                                        disabled={quizSubmitted}
+                                        onClick={() => setUserAnswers(prev => ({ ...prev, [q.id]: letter }))}
+                                        className={`w-full text-left rounded-lg border px-3 py-2 text-xs transition-colors ${cls}`}
+                                      >
+                                        {opt}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                                {quizSubmitted && chosen !== correct && (
+                                  <p className="mt-2 text-xs text-emerald-700">✓ Correct answer: {correct}</p>
+                                )}
+                              </div>
+                            );
+                          })}
+                          {!quizSubmitted && (
+                            <button
+                              onClick={() => setQuizSubmitted(true)}
+                              disabled={Object.keys(userAnswers).length < quiz.length}
+                              className="w-full rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-sm font-medium py-2.5 transition-colors"
+                            >
+                              Submit Answers ({Object.keys(userAnswers).length}/{quiz.length} answered)
+                            </button>
+                          )}
+                          {quizSubmitted && (
+                            <div className="rounded-xl border border-emerald-300 bg-emerald-50 p-4 text-center">
+                              <p className="text-lg font-bold text-emerald-700">
+                                {Object.entries(userAnswers).filter(([id, ans]) => {
+                                  const q = quiz.find(q => q.id === Number(id));
+                                  return q?.answer === ans;
+                                }).length} / {quiz.length} Correct
+                              </p>
+                              <p className="text-xs text-emerald-600 mt-1">
+                                {Object.entries(userAnswers).filter(([id, ans]) => quiz.find(q => q.id === Number(id))?.answer === ans).length === quiz.length
+                                  ? '🎉 Perfect score!'
+                                  : 'Review the highlighted answers above.'}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="flex flex-col items-center justify-center gap-3 py-16 text-gray-400">
+                          <p className="text-sm">Click <strong>✎ Quiz</strong> to generate questions from this document.</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {activePanel === 'summary' && (
                     <div className="h-full overflow-y-auto">
                       {loadingSummary ? (
@@ -444,7 +662,7 @@ export default function Home() {
                         <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
                           <p className="font-semibold mb-1">Summarisation failed</p>
                           <p>{summaryError}</p>
-                          <button onClick={handleSummarise} className="mt-3 text-xs text-red-600 hover:text-red-800 underline">
+                          <button onClick={() => handleSummarise()} className="mt-3 text-xs text-red-600 hover:text-red-800 underline">
                             Try again
                           </button>
                         </div>

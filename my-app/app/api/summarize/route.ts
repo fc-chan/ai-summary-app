@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import OpenAI from 'openai';
-import { PDFParse } from 'pdf-parse';
 import { supabaseAdmin, BUCKET_NAME } from '@/lib/supabase';
+import { extractText } from '@/lib/extractText';
 
 export const runtime = 'nodejs';
 
@@ -12,11 +12,34 @@ const client = new OpenAI({
 
 const MODEL = process.env.GITHUB_MODEL ?? 'gpt-4o-mini';
 
+type SummaryLength = 'short' | 'medium' | 'long';
+
+const LENGTH_CONFIG: Record<SummaryLength, { instruction: string; maxTokens: number }> = {
+  short: {
+    instruction:
+      'Write a SHORT summary (around 150–200 words). Include: (1) one Overview sentence, ' +
+      '(2) up to 3 Key Points as bullet points. Use markdown formatting.',
+    maxTokens: 400,
+  },
+  medium: {
+    instruction:
+      'Write a MEDIUM-length summary (around 300–400 words). Include: (1) a short Overview paragraph, ' +
+      '(2) Key Points as bullet points, (3) a brief Conclusion. Use markdown formatting.',
+    maxTokens: 1024,
+  },
+  long: {
+    instruction:
+      'Write a DETAILED summary (around 600–800 words). Include: (1) an Overview paragraph, ' +
+      '(2) an expanded Key Points section with explanations for each point, ' +
+      '(3) Notable Details or Examples, (4) a Conclusion. Use markdown formatting.',
+    maxTokens: 2048,
+  },
+};
+
 // POST /api/summarize
-// Body: { storagePath: string }
-// Downloads the file from Supabase, extracts text (PDF or TXT), then summarises with AI.
+// Body: { storagePath: string; length?: 'short' | 'medium' | 'long' }
 export async function POST(req: NextRequest) {
-  let body: { storagePath?: string };
+  let body: { storagePath?: string; length?: string };
   try {
     body = await req.json();
   } catch {
@@ -27,6 +50,9 @@ export async function POST(req: NextRequest) {
   if (!storagePath) {
     return NextResponse.json({ error: 'storagePath is required' }, { status: 400 });
   }
+
+  const length: SummaryLength =
+    body.length === 'short' || body.length === 'long' ? body.length : 'medium';
 
   // 1. Download the file bytes from Supabase Storage
   const { data: fileData, error: downloadError } = await supabaseAdmin.storage
@@ -42,55 +68,39 @@ export async function POST(req: NextRequest) {
 
   const ext = storagePath.split('.').pop()?.toLowerCase() ?? '';
 
-  // 2. Extract text based on file type
-  let text = '';
-  try {
-    if (ext === 'pdf') {
-      // pdf-parse v2: class-based API, pass Buffer via { data: buffer }
-      const arrayBuffer = await fileData.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-      const parser = new PDFParse({ data: buffer });
-      const parsed = await parser.getText();
-      await parser.destroy();
-      text = parsed.text?.trim() ?? '';
-    } else if (ext === 'txt') {
-      text = (await fileData.text()).trim();
-    } else {
-      return NextResponse.json(
-        { error: `Unsupported file type ".${ext}". Only PDF and TXT are supported.` },
-        { status: 422 }
-      );
-    }
-  } catch (e: unknown) {
-    return NextResponse.json(
-      { error: `Failed to extract text: ${e instanceof Error ? e.message : 'unknown'}` },
-      { status: 422 }
-    );
+  // 2. Extract text
+  const result = await extractText(fileData, ext);
+  if (result.error !== undefined) {
+    return NextResponse.json({ error: result.error }, { status: 422 });
   }
+  const text = result.text;
 
   if (!text) {
     return NextResponse.json(
-      { error: ext === 'pdf'
-          ? 'No readable text found in this PDF. It may be a scanned image.'
-          : 'The file appears to be empty.' },
+      {
+        error:
+          ext === 'pdf'
+            ? 'No readable text found in this PDF. It may be a scanned image.'
+            : 'The file appears to be empty.',
+      },
       { status: 422 }
     );
   }
 
-  // Truncate to avoid hitting token limits (~12,000 chars ≈ ~3k tokens)
-  const truncated = text.length > 12000 ? text.slice(0, 12000) + '\n\n[...document truncated...]' : text;
+  // Truncate to avoid token limits
+  const charLimit = length === 'long' ? 16000 : 12000;
+  const truncated =
+    text.length > charLimit ? text.slice(0, charLimit) + '\n\n[...document truncated...]' : text;
 
-  // 3. Summarise with GitHub Copilot Models
+  // 3. Summarise with AI
+  const { instruction, maxTokens } = LENGTH_CONFIG[length];
   try {
     const response = await client.chat.completions.create({
       model: MODEL,
       messages: [
         {
           role: 'system',
-          content:
-            'You are a professional document analyst. Summarise the provided document clearly and concisely. ' +
-            'Structure your response with: (1) a short Overview paragraph, (2) Key Points as bullet points, ' +
-            '(3) a brief Conclusion. Use markdown formatting.',
+          content: `You are a professional document analyst. ${instruction}`,
         },
         {
           role: 'user',
@@ -98,7 +108,7 @@ export async function POST(req: NextRequest) {
         },
       ],
       temperature: 0.4,
-      max_tokens: 1024,
+      max_tokens: maxTokens,
     });
 
     const summary = response.choices[0]?.message?.content ?? '';
