@@ -28,9 +28,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'No file provided' }, { status: 400 });
   }
 
-  // Sanitise the filename and make it unique with a timestamp prefix
+  // Sanitise the filename while preserving the original name
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const storagePath = `${Date.now()}_${safeName}`;
+  const storagePath = safeName;
 
   const arrayBuffer = await file.arrayBuffer();
   const buffer = Buffer.from(arrayBuffer);
@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
     .from(BUCKET_NAME)
     .upload(storagePath, buffer, {
       contentType: file.type || 'application/octet-stream',
-      upsert: false,
+      upsert: true,
     });
 
   if (error) {
