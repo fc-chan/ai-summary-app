@@ -78,11 +78,12 @@ export default function Home() {
   // Search
   const [searchQuery, setSearchQuery] = useState('');
 
-  // Keywords (AI-generated, read-only)
+  // Keywords (AI-generated, per-session state)
   const [fileKeywords, setFileKeywords] = useState<Record<string, string[]>>({});
   const [generatingKeywordsFor, setGeneratingKeywordsFor] = useState<string | null>(null);
+  const [keywordFilter, setKeywordFilter] = useState<string[]>([]);
 
-  // Load keywords from Supabase on mount
+  // Load persisted keywords on mount
   useEffect(() => {
     fetch('/api/tags')
       .then(r => r.json())
@@ -124,7 +125,9 @@ export default function Home() {
       const res = await fetch('/api/documents');
       const data = await res.json();
       if (!res.ok) throw new Error(data.error ?? 'Failed to fetch');
-      setFiles((data.files ?? []).filter((f: StorageFile) => f.name !== '.emptyFolderPlaceholder'));
+      setFiles((data.files ?? []).filter((f: StorageFile) =>
+        f.name !== '.emptyFolderPlaceholder' && f.name !== '__keywords__.json'
+      ));
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Unknown error');
     } finally {
@@ -386,8 +389,8 @@ export default function Home() {
                   {loadingList ? '…' : 'Refresh'}
                 </button>
               </div>
-              {/* Search */}
-              <div className="px-3 py-2 border-b border-gray-100">
+              {/* Search + Keyword Filter */}
+              <div className="px-3 pt-2 pb-2 border-b border-gray-100">
                 <div className="relative">
                   <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-4.35-4.35M17 11A6 6 0 105 11a6 6 0 0012 0z" />
@@ -403,6 +406,41 @@ export default function Home() {
                     <button onClick={() => setSearchQuery('')} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs">✕</button>
                   )}
                 </div>
+                {/* Keyword filter chips */}
+                {(() => {
+                  const allKws = [...new Set(Object.values(fileKeywords).flat())].sort();
+                  if (allKws.length === 0) return null;
+                  return (
+                    <div className="flex flex-wrap gap-1 pt-2">
+                      {allKws.map(kw => {
+                        const active = keywordFilter.includes(kw);
+                        return (
+                          <button
+                            key={kw}
+                            onClick={() => setKeywordFilter(prev =>
+                              active ? prev.filter(k => k !== kw) : [...prev, kw]
+                            )}
+                            className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
+                              active
+                                ? 'bg-blue-600 text-white border-blue-600'
+                                : 'bg-gray-50 text-gray-500 border-gray-200 hover:border-blue-400 hover:text-blue-600'
+                            }`}
+                          >
+                            {kw}
+                          </button>
+                        );
+                      })}
+                      {keywordFilter.length > 0 && (
+                        <button
+                          onClick={() => setKeywordFilter([])}
+                          className="text-[10px] px-2 py-0.5 rounded-full border border-gray-200 text-gray-400 hover:text-gray-600 transition-colors"
+                        >
+                          ✕ Clear
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
 
               {loadingList && files.length === 0 ? (
@@ -413,11 +451,18 @@ export default function Home() {
                 /* Scrollable on mobile, full on desktop */
                 <ul className="max-h-48 lg:max-h-[calc(100vh-360px)] overflow-y-auto divide-y divide-gray-100">
                   {(() => {
-                    const filtered = files.filter(f =>
-                      f.name.toLowerCase().includes(searchQuery.toLowerCase())
-                    );
+                    const filtered = files.filter(f => {
+                      const matchesSearch = f.name.toLowerCase().includes(searchQuery.toLowerCase());
+                      const matchesKw = keywordFilter.length === 0 ||
+                        keywordFilter.every(k => (fileKeywords[f.name] ?? []).includes(k));
+                      return matchesSearch && matchesKw;
+                    });
                     if (filtered.length === 0) return (
-                      <li className="px-4 py-6 text-center text-xs text-gray-400">No results for &ldquo;{searchQuery}&rdquo;</li>
+                      <li className="px-4 py-6 text-center text-xs text-gray-400">
+                        {keywordFilter.length > 0
+                          ? 'No documents match the selected keywords.'
+                          : <>No results for &ldquo;{searchQuery}&rdquo;</>}
+                      </li>
                     );
                     return filtered.map((file) => {
                       const isActive = selected?.name === file.name;
@@ -440,11 +485,27 @@ export default function Home() {
                               <p className="text-[10px] text-gray-400 animate-pulse mt-1">Generating keywords…</p>
                             ) : keywords.length > 0 ? (
                               <div className="flex flex-wrap gap-1 mt-1">
-                                {keywords.map(kw => (
-                                  <span key={kw} className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-100">
-                                    {kw}
-                                  </span>
-                                ))}
+                                {keywords.map(kw => {
+                                  const active = keywordFilter.includes(kw);
+                                  return (
+                                    <button
+                                      key={kw}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setKeywordFilter(prev =>
+                                          active ? prev.filter(k => k !== kw) : [...prev, kw]
+                                        );
+                                      }}
+                                      className={`text-[10px] px-1.5 py-0.5 rounded-full border transition-colors ${
+                                        active
+                                          ? 'bg-blue-600 text-white border-blue-600'
+                                          : 'bg-blue-50 text-blue-600 border-blue-100 hover:bg-blue-100'
+                                      }`}
+                                    >
+                                      {kw}
+                                    </button>
+                                  );
+                                })}
                               </div>
                             ) : null}
                           </div>

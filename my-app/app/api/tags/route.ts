@@ -13,8 +13,6 @@ const client = new OpenAI({
 const MODEL = process.env.GITHUB_MODEL ?? 'gpt-4o-mini';
 const KEYWORDS_FILE = '__keywords__.json';
 
-// ── Helpers ──────────────────────────────────────────────────────────
-
 async function loadAll(): Promise<Record<string, string[]>> {
   const { data, error } = await supabaseAdmin.storage.from(BUCKET_NAME).download(KEYWORDS_FILE);
   if (error || !data) return {};
@@ -26,14 +24,15 @@ async function saveAll(map: Record<string, string[]>): Promise<void> {
   await supabaseAdmin.storage.from(BUCKET_NAME).upload(KEYWORDS_FILE, blob, { upsert: true });
 }
 
-// ── GET /api/tags  → return all saved keywords ──────────────────────
+// GET /api/tags  → return all saved keywords
 export async function GET() {
   const keywords = await loadAll();
   return NextResponse.json({ keywords });
 }
 
-// ── POST /api/tags  → AI-generate 3 keywords for a file, then persist
+// POST /api/tags
 // Body: { storagePath: string }
+// Returns: { keywords: string[] }
 export async function POST(req: NextRequest) {
   let body: { storagePath?: string };
   try {
@@ -111,7 +110,7 @@ export async function POST(req: NextRequest) {
       keywords = matches ? matches.map((m) => m.replace(/"/g, '').trim()).slice(0, 3) : [];
     }
 
-    // 4. Persist
+    // Persist to Supabase
     if (keywords.length > 0) {
       const all = await loadAll();
       all[storagePath] = keywords;
