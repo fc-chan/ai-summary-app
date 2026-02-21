@@ -117,6 +117,10 @@ export default function Home() {
   }
 
   function handleUploadRequest(file: File) {
+    if (!isSummarisable(file.name)) {
+      setError('Only PDF and TXT files are supported. Please upload a .pdf or .txt file.');
+      return;
+    }
     showConfirm({
       title: 'Upload File',
       message: `Upload "${file.name}"?\nIf a file with the same name exists, it will be overwritten.`,
@@ -289,7 +293,7 @@ export default function Home() {
           </div>
         </div>
       </header>
-      <input ref={fileInputRef} type="file" accept=".pdf,.txt,text/plain,application/*" className="hidden" onChange={handleFileChange} />
+      <input ref={fileInputRef} type="file" accept=".pdf,.txt" className="hidden" onChange={handleFileChange} />
 
       <div className="max-w-6xl mx-auto px-4 py-4">
         {/* ── Error Banner ── */}
@@ -430,7 +434,7 @@ export default function Home() {
                       <div className="flex flex-col items-end gap-1.5 shrink-0">
                         <div className="flex gap-1.5">
                           <button
-                            onClick={handleSummarise}
+                            onClick={() => handleSummarise()}
                             disabled={loadingSummary}
                             className="flex items-center gap-1.5 bg-purple-600 hover:bg-purple-700 disabled:opacity-60 text-white text-xs font-medium px-3 py-1.5 rounded-lg transition-colors"
                           >
