@@ -23,6 +23,23 @@ interface QuizQuestion {
   answer: string;
 }
 
+interface MistakeRecord {
+  id: string;
+  storage_path: string;
+  file_name: string;
+  question_id: number;
+  question: string;
+  options: string[];
+  answer: string;
+  wrong_count: number;
+  correct_streak: number;
+  mastered: boolean;
+  last_seen_at: string;
+  created_at: string;
+}
+
+const MASTERY_THRESHOLD = 3;
+
 function formatBytes(b: number) {
   if (!b) return '—';
   const k = 1024, s = ['B', 'KB', 'MB', 'GB'];
@@ -75,6 +92,17 @@ export default function Home() {
   const [quizError, setQuizError] = useState<string | null>(null);
   const [userAnswers, setUserAnswers] = useState<Record<number, string>>({});
   const [quizSubmitted, setQuizSubmitted] = useState(false);
+
+  // Mistake book states
+  const [mistakeBook, setMistakeBook] = useState<MistakeRecord[]>([]);
+  const [mistakeBookOpen, setMistakeBookOpen] = useState(false);
+  const [reviewMode, setReviewMode] = useState(false);
+  const [reviewDone, setReviewDone] = useState(false);
+  const [reviewQueue, setReviewQueue] = useState<MistakeRecord[]>([]);
+  const [reviewIndex, setReviewIndex] = useState(0);
+  const [reviewAnswer, setReviewAnswer] = useState<string | null>(null);
+  const [reviewSubmitted, setReviewSubmitted] = useState(false);
+  const [sessionStats, setSessionStats] = useState({ correct: 0, total: 0, mastered: 0 });
 
   // Search
   const [searchQuery, setSearchQuery] = useState('');
@@ -139,6 +167,14 @@ export default function Home() {
   }, []);
 
   useEffect(() => { fetchFiles(); }, [fetchFiles]);
+
+  const fetchMistakeBook = useCallback(async () => {
+    const res = await fetch('/api/mistakes');
+    const data = await res.json();
+    if (res.ok) setMistakeBook(data.mistakes ?? []);
+  }, []);
+
+  useEffect(() => { fetchMistakeBook(); }, [fetchMistakeBook]);
 
   function downloadSummary() {
     if (!summary || !selected) return;
@@ -318,6 +354,83 @@ export default function Home() {
     }
   }
 
+  async function saveWrongAnswers(wrongQs: QuizQuestion[], storagePath: string, fileName: string) {
+    if (wrongQs.length === 0) return;
+    await fetch('/api/mistakes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        questions: wrongQs.map(q => ({
+          storage_path: storagePath,
+          file_name: fileName,
+          question_id: q.id,
+          question: q.question,
+          options: q.options,
+          answer: q.answer,
+        })),
+      }),
+    });
+    fetchMistakeBook();
+  }
+
+  async function handleQuizSubmit() {
+    if (!selected || !quiz) return;
+    setQuizSubmitted(true);
+    const wrong = quiz.filter(q => userAnswers[q.id] !== q.answer);
+    await saveWrongAnswers(wrong, selected.name, selected.name);
+  }
+
+  function startReview() {
+    setReviewQueue([...mistakeBook]);
+    setReviewIndex(0);
+    setReviewAnswer(null);
+    setReviewSubmitted(false);
+    setSessionStats({ correct: 0, total: 0, mastered: 0 });
+    setReviewDone(false);
+    setReviewMode(true);
+  }
+
+  async function handleReviewSubmit() {
+    if (!reviewAnswer || reviewSubmitted) return;
+    const current = reviewQueue[reviewIndex];
+    const correct = reviewAnswer === current.answer;
+    const res = await fetch(`/api/mistakes/${current.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ correct }),
+    });
+    const data = await res.json();
+    setReviewSubmitted(true);
+    setSessionStats(prev => ({
+      correct: prev.correct + (correct ? 1 : 0),
+      total: prev.total + 1,
+      mastered: prev.mastered + (data.mastered ? 1 : 0),
+    }));
+    if (data.mastered) {
+      setMistakeBook(prev => prev.filter(m => m.id !== current.id));
+    } else {
+      setMistakeBook(prev => prev.map(m =>
+        m.id === current.id ? { ...m, correct_streak: data.newStreak } : m
+      ));
+    }
+  }
+
+  function handleReviewNext() {
+    if (reviewIndex + 1 >= reviewQueue.length) {
+      setReviewDone(true);
+      setReviewMode(false);
+    } else {
+      setReviewIndex(prev => prev + 1);
+      setReviewAnswer(null);
+      setReviewSubmitted(false);
+    }
+  }
+
+  async function handleRemoveMistake(id: string) {
+    await fetch(`/api/mistakes/${id}`, { method: 'DELETE' });
+    setMistakeBook(prev => prev.filter(m => m.id !== id));
+  }
+
   function handleLengthChange(len: 'short' | 'medium' | 'long') {
     if (len === summaryLength) return;
     setSummaryLength(len);
@@ -340,6 +453,212 @@ export default function Home() {
           onCancel={closeModal}
         />
       )}
+
+      {/* ── Mistake Book Modal ── */}
+      {mistakeBookOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden">
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200 shrink-0">
+              <div className="flex items-center gap-2">
+                <span className="text-base font-bold text-gray-900">📝 Mistake Book</span>
+                {mistakeBook.length > 0 && (
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-orange-100 text-orange-600 border border-orange-200 font-medium">
+                    {mistakeBook.length} to review
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                {!reviewMode && !reviewDone && mistakeBook.length > 0 && (
+                  <button
+                    onClick={startReview}
+                    className="flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg bg-orange-500 hover:bg-orange-600 text-white transition-colors"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Start Review
+                  </button>
+                )}
+                <button
+                  onClick={() => { setMistakeBookOpen(false); setReviewMode(false); setReviewDone(false); }}
+                  className="text-gray-400 hover:text-gray-600 text-lg font-bold leading-none"
+                >✕</button>
+              </div>
+            </div>
+
+            {/* Body */}
+            <div className="flex-1 overflow-y-auto">
+              {/* Review Mode */}
+              {reviewMode && (() => {
+                const current = reviewQueue[reviewIndex];
+                const isCorrect = reviewAnswer === current.answer;
+                return (
+                  <div className="p-5">
+                    {/* Progress */}
+                    <div className="flex items-center justify-between mb-4">
+                      <span className="text-xs text-gray-500">Question {reviewIndex + 1} / {reviewQueue.length}</span>
+                      <div className="flex gap-1">
+                        {reviewQueue.map((_, i) => (
+                          <span key={i} className={`w-2 h-2 rounded-full ${
+                            i < reviewIndex ? 'bg-emerald-400'
+                            : i === reviewIndex ? 'bg-orange-400'
+                            : 'bg-gray-200'
+                          }`} />
+                        ))}
+                      </div>
+                      <button onClick={() => { setReviewMode(false); }} className="text-xs text-gray-400 hover:text-gray-600">Exit</button>
+                    </div>
+                    {/* File source */}
+                    <p className="text-[10px] text-gray-400 mb-3">📄 {current.file_name}</p>
+                    {/* Streak */}
+                    <div className="flex items-center gap-1.5 mb-4">
+                      <span className="text-[10px] text-gray-500">Mastery:</span>
+                      {Array.from({ length: MASTERY_THRESHOLD }, (_, i) => (
+                        <span key={i} className={`w-2.5 h-2.5 rounded-full border ${
+                          i < current.correct_streak ? 'bg-emerald-400 border-emerald-400' : 'bg-white border-gray-300'
+                        }`} />
+                      ))}
+                      <span className="text-[10px] text-gray-400">{current.correct_streak}/{MASTERY_THRESHOLD}</span>
+                    </div>
+                    {/* Question */}
+                    <p className="text-sm font-semibold text-gray-800 mb-4">{current.question}</p>
+                    {/* Options */}
+                    <div className="space-y-2 mb-5">
+                      {current.options.map(opt => {
+                        const letter = opt.charAt(0);
+                        const isChosen = reviewAnswer === letter;
+                        const isCorrectOpt = current.answer === letter;
+                        let cls = 'border-gray-200 bg-gray-50 text-gray-700 hover:border-orange-300 hover:bg-orange-50';
+                        if (reviewSubmitted) {
+                          if (isCorrectOpt) cls = 'border-emerald-400 bg-emerald-50 text-emerald-800 font-medium';
+                          else if (isChosen) cls = 'border-red-300 bg-red-50 text-red-700 line-through';
+                          else cls = 'border-gray-200 bg-gray-50 text-gray-400';
+                        } else if (isChosen) {
+                          cls = 'border-orange-400 bg-orange-50 text-orange-800 font-medium';
+                        }
+                        return (
+                          <button
+                            key={letter}
+                            disabled={reviewSubmitted}
+                            onClick={() => setReviewAnswer(letter)}
+                            className={`w-full text-left rounded-lg border px-3 py-2 text-xs transition-colors ${cls}`}
+                          >{opt}</button>
+                        );
+                      })}
+                    </div>
+                    {/* Result */}
+                    {reviewSubmitted ? (
+                      <div className={`rounded-lg p-3 mb-4 text-sm font-medium ${
+                        isCorrect ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-red-50 text-red-700 border border-red-200'
+                      }`}>
+                        {isCorrect ? (
+                          <>✓ Correct!
+                            {reviewQueue[reviewIndex].correct_streak + 1 >= MASTERY_THRESHOLD
+                              ? ' 🎉 Mastered — removed from mistake book!'
+                              : ` Streak: ${reviewQueue[reviewIndex].correct_streak + 1}/${MASTERY_THRESHOLD} to mastery`}
+                          </>
+                        ) : (
+                          <>✗ Wrong. Correct answer: <strong>{current.answer}</strong>. Streak reset.
+                          </>
+                        )}
+                      </div>
+                    ) : (
+                      <button
+                        onClick={handleReviewSubmit}
+                        disabled={!reviewAnswer}
+                        className="w-full rounded-lg bg-orange-500 hover:bg-orange-600 disabled:opacity-40 text-white text-sm font-medium py-2.5 transition-colors"
+                      >Confirm Answer</button>
+                    )}
+                    {reviewSubmitted && (
+                      <button
+                        onClick={handleReviewNext}
+                        className="w-full rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50 text-sm font-medium py-2.5 transition-colors"
+                      >
+                        {reviewIndex + 1 >= reviewQueue.length ? 'Finish Session' : 'Next →'}
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Session Done */}
+              {reviewDone && (
+                <div className="flex flex-col items-center justify-center py-12 px-5 text-center">
+                  <div className="text-4xl mb-3">{sessionStats.correct === sessionStats.total ? '🎉' : '📚'}</div>
+                  <p className="text-lg font-bold text-gray-800 mb-1">
+                    Session Complete! {sessionStats.correct} / {sessionStats.total} correct
+                  </p>
+                  {sessionStats.mastered > 0 && (
+                    <p className="text-sm text-emerald-600 mb-1">🌟 {sessionStats.mastered} question{sessionStats.mastered > 1 ? 's' : ''} mastered — removed from mistake book!</p>
+                  )}
+                  {mistakeBook.length > 0 && (
+                    <p className="text-xs text-gray-400 mb-5">{mistakeBook.length} remaining to master.</p>
+                  )}
+                  <button
+                    onClick={() => { setReviewDone(false); }}
+                    className="text-sm text-orange-600 hover:text-orange-800 border border-orange-200 rounded-lg px-4 py-2"
+                  >Back to List</button>
+                </div>
+              )}
+
+              {/* List View */}
+              {!reviewMode && !reviewDone && (
+                mistakeBook.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-16 text-gray-400">
+                    <div className="text-4xl mb-3">🌟</div>
+                    <p className="text-sm font-medium text-gray-600">No mistakes yet!</p>
+                    <p className="text-xs mt-1">Complete a quiz and wrong answers will appear here.</p>
+                  </div>
+                ) : (
+                  <div className="p-4 space-y-4">
+                    {Object.entries(
+                      mistakeBook.reduce<Record<string, MistakeRecord[]>>((acc, m) => {
+                        (acc[m.file_name] ??= []).push(m); return acc;
+                      }, {})
+                    ).map(([fileName, items]) => (
+                      <div key={fileName}>
+                        <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-2">📄 {fileName} — {items.length} mistake{items.length > 1 ? 's' : ''}</p>
+                        <ul className="space-y-2">
+                          {items.map(m => (
+                            <li key={m.id} className="flex items-start gap-3 rounded-xl border border-gray-100 bg-gray-50 px-3 py-2.5">
+                              <div className="flex-1 min-w-0">
+                                <p className="text-xs text-gray-800 font-medium leading-relaxed">{m.question}</p>
+                                <div className="flex items-center gap-2 mt-1.5">
+                                  <span className="text-[10px] text-red-500">❌ ×{m.wrong_count}</span>
+                                  <div className="flex items-center gap-0.5">
+                                    {Array.from({ length: MASTERY_THRESHOLD }, (_, i) => (
+                                      <span key={i} className={`w-2 h-2 rounded-full border ${
+                                        i < m.correct_streak ? 'bg-emerald-400 border-emerald-400' : 'bg-white border-gray-300'
+                                      }`} />
+                                    ))}
+                                  </div>
+                                  <span className="text-[10px] text-gray-400">{m.correct_streak}/{MASTERY_THRESHOLD}</span>
+                                </div>
+                              </div>
+                              <button
+                                onClick={() => handleRemoveMistake(m.id)}
+                                title="Remove from mistake book"
+                                className="shrink-0 p-1 text-gray-300 hover:text-red-500 transition-colors"
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                </svg>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                  </div>
+                )
+              )}
+            </div>
+          </div>
+        </div>
+      )}
       {/* ── Top Nav ── */}
       <header className="bg-white border-b border-gray-200 px-4 py-3 sticky top-0 z-10">
         <div className="max-w-6xl mx-auto flex items-center justify-between">
@@ -347,6 +666,21 @@ export default function Home() {
             <h1 className="text-lg font-bold text-gray-900">AI Document Summary</h1>
             <p className="text-xs text-gray-500 hidden sm:block">Upload PDFs and get instant AI summaries</p>
           </div>
+          <button
+            onClick={() => { setMistakeBookOpen(true); setReviewMode(false); setReviewDone(false); }}
+            className="relative flex items-center gap-1.5 text-xs font-medium px-3 py-1.5 rounded-lg border border-orange-200 text-orange-600 hover:bg-orange-50 transition-colors"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+            </svg>
+            Mistake Book
+            {mistakeBook.length > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-orange-500 text-white text-[9px] flex items-center justify-center font-bold">
+                {mistakeBook.length > 9 ? '9+' : mistakeBook.length}
+              </span>
+            )}
+          </button>
         </div>
       </header>
       <input ref={fileInputRef} type="file" accept=".pdf,.txt" className="hidden" onChange={handleFileChange} />
@@ -753,7 +1087,7 @@ export default function Home() {
                             <span className="text-emerald-700 text-sm font-semibold">✎ Quiz — {quiz.length} Questions</span>
                             {quizSubmitted && (
                               <button
-                                onClick={() => { setUserAnswers({}); setQuizSubmitted(false); setQuiz(null); handleQuiz(); }}
+                                onClick={() => setQuizSubmitted(false)}
                                 className="text-xs text-emerald-600 hover:text-emerald-800 border border-emerald-200 rounded-md px-2 py-1"
                               >Retake Quiz</button>
                             )}
@@ -803,7 +1137,7 @@ export default function Home() {
                           })}
                           {!quizSubmitted && (
                             <button
-                              onClick={() => setQuizSubmitted(true)}
+                              onClick={handleQuizSubmit}
                               disabled={Object.keys(userAnswers).length < quiz.length}
                               className="w-full rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-40 text-white text-sm font-medium py-2.5 transition-colors"
                             >
@@ -823,6 +1157,21 @@ export default function Home() {
                                   ? '🎉 Perfect score!'
                                   : 'Review the highlighted answers above.'}
                               </p>
+                              {(() => {
+                                const wrongCount = quiz.filter(q => userAnswers[q.id] !== q.answer).length;
+                                return wrongCount > 0 ? (
+                                  <p className="text-xs text-orange-600 mt-2">
+                                    📝 {wrongCount} wrong answer{wrongCount > 1 ? 's' : ''} saved to your
+                                    <button onClick={() => { setMistakeBookOpen(true); setReviewMode(false); }} className="ml-1 underline hover:text-orange-800">Mistake Book</button>.
+                                  </p>
+                                ) : null;
+                              })()}
+                              <div className="flex justify-center gap-2 mt-3">
+                                <button
+                                  onClick={() => { setUserAnswers({}); setQuizSubmitted(false); setQuiz(null); handleQuiz(); }}
+                                  className="text-xs text-emerald-600 hover:text-emerald-800 border border-emerald-200 rounded-md px-3 py-1"
+                                >Retake Quiz</button>
+                              </div>
                             </div>
                           )}
                         </div>
