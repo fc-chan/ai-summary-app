@@ -83,6 +83,8 @@ export default function Home() {
   const [fileKeywords, setFileKeywords] = useState<Record<string, string[]>>({});
   const [generatingKeywordsFor, setGeneratingKeywordsFor] = useState<string | null>(null);
   const [keywordFilter, setKeywordFilter] = useState<string[]>([]);
+  const [showAllKeywords, setShowAllKeywords] = useState(false);
+  const MAX_VISIBLE_KEYWORDS = 8;
 
   // Load persisted keywords on mount
   useEffect(() => {
@@ -393,7 +395,16 @@ export default function Home() {
                 <span className="text-sm font-semibold text-gray-800">
                   Documents
                   {files.length > 0 && (
-                    <span className="ml-2 text-xs bg-gray-100 text-gray-500 rounded-full px-2 py-0.5">{files.length}</span>
+                    <span className="ml-2 text-xs bg-gray-100 text-gray-500 rounded-full px-2 py-0.5">
+                      {keywordFilter.length > 0 || searchQuery
+                        ? `${files.filter(f => {
+                            const q = searchQuery.toLowerCase();
+                            const tags = fileKeywords[f.name] ?? [];
+                            return (!q || f.name.toLowerCase().includes(q) || tags.some(t => t.toLowerCase().includes(q)))
+                              && (keywordFilter.length === 0 || keywordFilter.every(k => tags.includes(k)));
+                          }).length} / ${files.length}`
+                        : files.length}
+                    </span>
                   )}
                 </span>
                 <button onClick={fetchFiles} disabled={loadingList} className="text-xs text-blue-600 hover:text-blue-800 disabled:opacity-50">
@@ -408,7 +419,7 @@ export default function Home() {
                   </svg>
                   <input
                     type="text"
-                    placeholder="Search documents…"
+                    placeholder="Search by name or tag…"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     className="w-full pl-8 pr-3 py-1.5 text-xs rounded-lg border border-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-300 bg-gray-50"
@@ -421,34 +432,55 @@ export default function Home() {
                 {(() => {
                   const allKws = [...new Set(Object.values(fileKeywords).flat())].sort();
                   if (allKws.length === 0) return null;
+                  const visibleKws = showAllKeywords ? allKws : allKws.slice(0, MAX_VISIBLE_KEYWORDS);
+                  const hiddenCount = allKws.length - MAX_VISIBLE_KEYWORDS;
                   return (
-                    <div className="flex flex-wrap gap-1 pt-2">
-                      {allKws.map(kw => {
-                        const active = keywordFilter.includes(kw);
-                        return (
+                    <div className="pt-2">
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-[10px] font-semibold text-gray-400 uppercase tracking-wide">Filter by tag</span>
+                        {keywordFilter.length > 0 && (
+                          <span className="text-[10px] text-blue-600 font-medium">
+                            {keywordFilter.length} active
+                            <button onClick={() => setKeywordFilter([])} className="ml-1.5 text-gray-400 hover:text-red-500">✕</button>
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {visibleKws.map(kw => {
+                          const active = keywordFilter.includes(kw);
+                          return (
+                            <button
+                              key={kw}
+                              onClick={() => setKeywordFilter(prev =>
+                                active ? prev.filter(k => k !== kw) : [...prev, kw]
+                              )}
+                              className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
+                                active
+                                  ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                                  : 'bg-gray-50 text-gray-500 border-gray-200 hover:border-blue-400 hover:text-blue-600'
+                              }`}
+                            >
+                              {active && <span className="mr-0.5">✓</span>}{kw}
+                            </button>
+                          );
+                        })}
+                        {!showAllKeywords && hiddenCount > 0 && (
                           <button
-                            key={kw}
-                            onClick={() => setKeywordFilter(prev =>
-                              active ? prev.filter(k => k !== kw) : [...prev, kw]
-                            )}
-                            className={`text-[10px] px-2 py-0.5 rounded-full border transition-colors ${
-                              active
-                                ? 'bg-blue-600 text-white border-blue-600'
-                                : 'bg-gray-50 text-gray-500 border-gray-200 hover:border-blue-400 hover:text-blue-600'
-                            }`}
+                            onClick={() => setShowAllKeywords(true)}
+                            className="text-[10px] px-2 py-0.5 rounded-full border border-gray-200 text-gray-400 hover:text-blue-600 hover:border-blue-400 transition-colors"
                           >
-                            {kw}
+                            +{hiddenCount} more
                           </button>
-                        );
-                      })}
-                      {keywordFilter.length > 0 && (
-                        <button
-                          onClick={() => setKeywordFilter([])}
-                          className="text-[10px] px-2 py-0.5 rounded-full border border-gray-200 text-gray-400 hover:text-gray-600 transition-colors"
-                        >
-                          ✕ Clear
-                        </button>
-                      )}
+                        )}
+                        {showAllKeywords && allKws.length > MAX_VISIBLE_KEYWORDS && (
+                          <button
+                            onClick={() => setShowAllKeywords(false)}
+                            className="text-[10px] px-2 py-0.5 rounded-full border border-gray-200 text-gray-400 hover:text-gray-600 transition-colors"
+                          >
+                            Show less
+                          </button>
+                        )}
+                      </div>
                     </div>
                   );
                 })()}
@@ -463,15 +495,19 @@ export default function Home() {
                 <ul className="max-h-48 lg:max-h-[calc(100vh-360px)] overflow-y-auto divide-y divide-gray-100">
                   {(() => {
                     const filtered = files.filter(f => {
-                      const matchesSearch = f.name.toLowerCase().includes(searchQuery.toLowerCase());
+                      const q = searchQuery.toLowerCase();
+                      const tags = fileKeywords[f.name] ?? [];
+                      const matchesSearch = !q ||
+                        f.name.toLowerCase().includes(q) ||
+                        tags.some(t => t.toLowerCase().includes(q));
                       const matchesKw = keywordFilter.length === 0 ||
-                        keywordFilter.every(k => (fileKeywords[f.name] ?? []).includes(k));
+                        keywordFilter.every(k => tags.includes(k));
                       return matchesSearch && matchesKw;
                     });
                     if (filtered.length === 0) return (
                       <li className="px-4 py-6 text-center text-xs text-gray-400">
                         {keywordFilter.length > 0
-                          ? 'No documents match the selected keywords.'
+                          ? 'No documents match the selected tags.'
                           : <>No results for &ldquo;{searchQuery}&rdquo;</>}
                       </li>
                     );
@@ -496,7 +532,7 @@ export default function Home() {
                               <p className="text-[10px] text-gray-400 animate-pulse mt-1">Generating keywords…</p>
                             ) : keywords.length > 0 ? (
                               <div className="flex flex-wrap gap-1 mt-1">
-                                {keywords.map(kw => {
+                                {keywords.slice(0, 3).map(kw => {
                                   const active = keywordFilter.includes(kw);
                                   return (
                                     <button
@@ -517,6 +553,11 @@ export default function Home() {
                                     </button>
                                   );
                                 })}
+                                {keywords.length > 3 && (
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-400 border border-gray-200">
+                                    +{keywords.length - 3}
+                                  </span>
+                                )}
                               </div>
                             ) : null}
                           </div>
