@@ -37,22 +37,37 @@ const LENGTH_CONFIG: Record<SummaryLength, { instruction: string; maxTokens: num
 };
 
 // POST /api/summarize
-// Body: { storagePath: string; length?: 'short' | 'medium' | 'long' }
+// Body: { storagePath: string; fileName?: string; length?: 'short' | 'medium' | 'long'; force?: boolean }
 export async function POST(req: NextRequest) {
-  let body: { storagePath?: string; length?: string };
+  let body: { storagePath?: string; fileName?: string; length?: string; force?: boolean };
   try {
     body = await req.json();
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
   }
 
-  const { storagePath } = body;
+  const { storagePath, fileName } = body;
   if (!storagePath) {
     return NextResponse.json({ error: 'storagePath is required' }, { status: 400 });
   }
 
   const length: SummaryLength =
     body.length === 'short' || body.length === 'long' ? body.length : 'medium';
+
+  // 0. Return cached summary unless force regeneration is requested
+  const force = body.force === true;
+  if (!force) {
+    const { data: cached } = await supabaseAdmin
+      .from('summaries')
+      .select('summary')
+      .eq('storage_path', storagePath)
+      .eq('length', length)
+      .maybeSingle();
+
+    if (cached?.summary) {
+      return NextResponse.json({ summary: cached.summary, cached: true });
+    }
+  }
 
   // 1. Download the file bytes from Supabase Storage
   const { data: fileData, error: downloadError } = await supabaseAdmin.storage
@@ -112,6 +127,25 @@ export async function POST(req: NextRequest) {
     });
 
     const summary = response.choices[0]?.message?.content ?? '';
+
+    // 4. 將摘要儲存至 Supabase 資料庫（upsert：若已有相同檔案+長度的記錄則覆蓋）
+    const { error: upsertError } = await supabaseAdmin
+      .from('summaries')
+      .upsert(
+        {
+          storage_path: storagePath,
+          file_name: fileName ?? storagePath.split('/').pop() ?? storagePath,
+          length,
+          summary,
+        },
+        { onConflict: 'storage_path,length' }
+      );
+
+    if (upsertError) {
+      console.error('Failed to save summary to DB:', upsertError.message);
+      return NextResponse.json({ summary, warning: 'Summary generated but failed to save to database.' });
+    }
+
     return NextResponse.json({ summary });
   } catch (e: unknown) {
     return NextResponse.json(
