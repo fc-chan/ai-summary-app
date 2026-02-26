@@ -8,10 +8,10 @@ export const maxDuration = 60;
 
 const client = new OpenAI({
   baseURL: 'https://models.inference.ai.azure.com',
-  apiKey: process.env.GITHUB_TOKEN,
+  apiKey: process.env.GITHUB_TOKEN?.trim(),
 });
 
-const MODEL = process.env.GITHUB_MODEL ?? 'gpt-4o-mini';
+const MODEL = (process.env.GITHUB_MODEL ?? 'gpt-4o-mini').trim();
 
 export interface QuizQuestion {
   id: number;
