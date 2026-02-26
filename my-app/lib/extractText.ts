@@ -1,4 +1,4 @@
-import { PDFParse } from 'pdf-parse';
+import { extractText as pdfExtractText } from 'unpdf';
 
 /**
  * Extracts plain text from a Blob (PDF or TXT).
@@ -11,11 +11,9 @@ export async function extractText(
   try {
     if (ext === 'pdf') {
       const arrayBuffer = await fileData.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
-      const parser = new PDFParse({ data: buffer });
-      const parsed = await parser.getText();
-      await parser.destroy();
-      return { text: parsed.text?.trim() ?? '' };
+      const buffer = new Uint8Array(arrayBuffer);
+      const { text } = await pdfExtractText(buffer, { mergePages: true });
+      return { text: text?.trim() ?? '' };
     } else if (ext === 'txt') {
       return { text: (await fileData.text()).trim() };
     } else {

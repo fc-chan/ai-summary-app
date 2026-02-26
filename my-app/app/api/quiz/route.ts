@@ -4,6 +4,7 @@ import { supabaseAdmin, BUCKET_NAME } from '@/lib/supabase';
 import { extractText } from '@/lib/extractText';
 
 export const runtime = 'nodejs';
+export const maxDuration = 60;
 
 const client = new OpenAI({
   baseURL: 'https://models.inference.ai.azure.com',
